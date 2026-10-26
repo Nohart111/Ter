@@ -1,12 +1,13 @@
 import React, { useEffect, useState } from 'react'
 import QRCode from 'qrcode'
-import { Copy, Check, QrCode, X, CheckCircle2, FileText, Sparkles } from 'lucide-react'
+import { Copy, Check, QrCode, X, CheckCircle2, FileText, Sparkles, Loader2 } from 'lucide-react'
 import { formatBytes } from '../utils/chunker'
 import type { TransferStatus } from '../types'
 
 interface SenderViewProps {
   payload: { type: 'file'; file: File } | { type: 'text'; text: string }
   pin: string
+  isReady: boolean
   status: TransferStatus
   progress: number
   bytesSent: number
@@ -16,6 +17,7 @@ interface SenderViewProps {
 export const SenderView: React.FC<SenderViewProps> = ({
   payload,
   pin,
+  isReady,
   status,
   progress,
   onReset,
@@ -38,16 +40,17 @@ export const SenderView: React.FC<SenderViewProps> = ({
   }, [payload, isFile, isImage])
 
   useEffect(() => {
-    if (pin) {
+    if (pin && isReady) {
       QRCode.toDataURL(directLink, {
         width: 260,
         margin: 1,
         color: { dark: '#09090b', light: '#ffffff' },
       }).then(setQrDataUrl)
     }
-  }, [pin, directLink])
+  }, [pin, isReady, directLink])
 
   const copyCode = () => {
+    if (!isReady) return
     navigator.clipboard.writeText(pin)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
@@ -104,12 +107,13 @@ export const SenderView: React.FC<SenderViewProps> = ({
 
       {/* Code Display Card */}
       <div className="relative p-8 rounded-3xl bg-white/90 dark:bg-zinc-900/90 backdrop-blur-xl border border-zinc-200/80 dark:border-zinc-800/80 shadow-lg shadow-zinc-500/5 dark:shadow-none text-center overflow-hidden">
-        {/* Subtle decorative gradient glow */}
         <div className="absolute top-0 left-1/2 -translate-x-1/2 w-48 h-24 bg-gradient-to-b from-indigo-500/10 to-transparent blur-2xl pointer-events-none -z-10" />
 
         <div
           onClick={copyCode}
-          className="cursor-pointer group select-none inline-block p-4 rounded-2xl hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-all duration-200"
+          className={`cursor-pointer group select-none inline-block p-4 rounded-2xl hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-all duration-200 ${
+            !isReady ? 'opacity-50 pointer-events-none' : ''
+          }`}
           title="Bấm để sao chép"
         >
           <div className="font-mono text-5xl sm:text-6xl font-bold tracking-widest text-zinc-900 dark:text-zinc-100 group-hover:scale-[1.02] transition-transform">
@@ -117,25 +121,37 @@ export const SenderView: React.FC<SenderViewProps> = ({
           </div>
 
           <div className="flex items-center justify-center gap-1.5 mt-3 text-xs font-medium text-zinc-400 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
-            {copied ? (
-              <Check className="w-3.5 h-3.5 text-emerald-500" />
+            {!isReady ? (
+              <span className="flex items-center gap-1.5 text-zinc-400">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <span>Đang kết nối tín hiệu...</span>
+              </span>
+            ) : copied ? (
+              <>
+                <Check className="w-3.5 h-3.5 text-emerald-500" />
+                <span>Đã sao chép</span>
+              </>
             ) : (
-              <Copy className="w-3.5 h-3.5" />
+              <>
+                <Copy className="w-3.5 h-3.5" />
+                <span>Bấm để sao chép</span>
+              </>
             )}
-            <span>{copied ? 'Đã sao chép' : 'Bấm để sao chép'}</span>
           </div>
         </div>
 
         {/* Action icons */}
-        <div className="flex items-center justify-center gap-3 mt-4 pt-4 border-t border-zinc-100 dark:border-zinc-800/60">
-          <button
-            onClick={() => setShowQr(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/80 transition-colors"
-          >
-            <QrCode className="w-3.5 h-3.5 text-indigo-500" />
-            <span>Mã QR</span>
-          </button>
-        </div>
+        {isReady && (
+          <div className="flex items-center justify-center gap-3 mt-4 pt-4 border-t border-zinc-100 dark:border-zinc-800/60">
+            <button
+              onClick={() => setShowQr(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/80 transition-colors"
+            >
+              <QrCode className="w-3.5 h-3.5 text-indigo-500" />
+              <span>Mã QR</span>
+            </button>
+          </div>
+        )}
 
         {/* Progress Bar (nếu là file đang truyền) */}
         {(status === 'transferring' || status === 'completed') && (

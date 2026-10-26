@@ -8,6 +8,20 @@ import { ReceiverView } from './components/ReceiverView'
 import { sendFileInChunks } from './utils/chunker'
 import type { TransferStatus, TransferMessage, FileHeader } from './types'
 
+// Cấu hình STUN máy chủ toàn cầu để đảm bảo vượt tường lửa / NAT giữa các mạng khác nhau
+const PEER_CONFIG = {
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun.cloudflare.com:3478' },
+      { urls: 'stun:global.stun.twilio.com:3478' },
+    ],
+    iceCandidatePoolSize: 10,
+  },
+}
+
 export function App() {
   const [activeTab, setActiveTab] = useState<'send' | 'receive'>('send')
   const [sendType, setSendType] = useState<'file' | 'text'>('file')
@@ -18,9 +32,13 @@ export function App() {
   const [textInput, setTextInput] = useState('')
 
   const [pin, setPin] = useState<string>('')
+  const [isPeerReady, setIsPeerReady] = useState(false)
   const [receiverPin, setReceiverPin] = useState<string[]>(['', '', '', '', '', ''])
 
   const [status, setStatus] = useState<TransferStatus>('idle')
+  const statusRef = useRef<TransferStatus>('idle')
+  statusRef.current = status
+
   const [progress, setProgress] = useState(0)
   const [bytesTransferred, setBytesTransferred] = useState(0)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
@@ -50,7 +68,7 @@ export function App() {
       setReceiverPin(codeParam.split(''))
       const timer = setTimeout(() => {
         handleConnectToSender(codeParam)
-      }, 400)
+      }, 500)
       return () => clearTimeout(timer)
     }
   }, [])
@@ -59,7 +77,6 @@ export function App() {
   useEffect(() => {
     const handleGlobalPaste = (e: ClipboardEvent) => {
       const activeEl = document.activeElement
-      // Nếu đang gõ trong ô textarea hoặc input thì không can thiệp
       if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) return
 
       if (e.clipboardData) {
@@ -97,6 +114,7 @@ export function App() {
     setSenderPayload(payload)
     setActiveTab('send')
     setStatus('waiting')
+    setIsPeerReady(false)
     setProgress(0)
     setBytesTransferred(0)
 
@@ -104,13 +122,21 @@ export function App() {
     setPin(randomPin)
 
     const peerId = `ter-${randomPin}`
-    const peer = new Peer(peerId)
+    const peer = new Peer(peerId, PEER_CONFIG)
     senderPeerRef.current = peer
+
+    peer.on('open', () => {
+      setIsPeerReady(true)
+    })
 
     peer.on('connection', (conn) => {
       activeConnRef.current = conn
 
-      conn.on('open', async () => {
+      let hasSent = false
+      const executeTransfer = async () => {
+        if (hasSent) return
+        hasSent = true
+
         setStatus('transferring')
         try {
           if (payload.type === 'file') {
@@ -123,57 +149,91 @@ export function App() {
             setProgress(100)
           }
           setStatus('completed')
-        } catch {
+        } catch (err) {
+          console.error('Lỗi khi gửi dữ liệu:', err)
           setStatus('error')
         }
+      }
+
+      // Handshake: Lắng nghe tín hiệu 'ready' từ bên nhận
+      conn.on('data', (data: any) => {
+        if (data?.type === 'ready') {
+          executeTransfer()
+        }
       })
+
+      // Fallback nếu kết nối đã mở mà chưa có handshake
+      if (conn.open) {
+        setTimeout(executeTransfer, 300)
+      } else {
+        conn.on('open', () => {
+          setTimeout(executeTransfer, 300)
+        })
+      }
     })
 
     peer.on('error', (err) => {
+      console.warn('Sender peer error:', err)
       if (err.type === 'unavailable-id') {
         initSenderPeer(payload)
       }
     })
   }
 
-  // Kết nối tới máy gửi để nhận nội dung
-  const handleConnectToSender = (targetPin: string) => {
+  // Kết nối tới máy gửi để nhận nội dung với cơ chế Auto-Retry
+  const handleConnectToSender = (targetPin: string, attempt = 1) => {
+    const cleanPin = targetPin.replace(/\D/g, '')
+    if (cleanPin.length !== 6) return
+
     cleanupReceiverPeer()
     setErrorMessage(null)
     setStatus('connecting')
     setProgress(0)
 
-    const receiverPeer = new Peer()
+    const receiverPeer = new Peer(PEER_CONFIG)
     receiverPeerRef.current = receiverPeer
 
-    let timeout: any = null
+    let timeoutTimer: any = null
 
     receiverPeer.on('open', () => {
-      const conn = receiverPeer.connect(`ter-${targetPin}`, { reliable: true })
+      // Kết nối trực tiếp qua WebRTC DataChannel (bỏ reliable: true để tránh deadlock)
+      const conn = receiverPeer.connect(`ter-${cleanPin}`)
       activeConnRef.current = conn
 
-      timeout = setTimeout(() => {
-        if (status !== 'transferring' && status !== 'completed') {
+      // Đặt timeout 15s (dùng statusRef để tránh stale closure)
+      timeoutTimer = setTimeout(() => {
+        if (statusRef.current !== 'transferring' && statusRef.current !== 'completed') {
           setStatus('idle')
-          setErrorMessage('Mã không hợp lệ hoặc đã hết hạn')
+          setErrorMessage('Mã không hợp lệ hoặc đã hết hạn. Hãy kiểm tra lại.')
           conn.close()
         }
-      }, 10000)
+      }, 15000)
 
       let header: FileHeader | null = null
       const chunks: ArrayBuffer[] = []
       let bytesReceived = 0
 
-      conn.on('open', () => {
-        clearTimeout(timeout)
+      const handleConnOpen = () => {
+        clearTimeout(timeoutTimer)
         setStatus('transferring')
-      })
+        // Gửi handshake 'ready' báo cho Sender biết kênh đã thông
+        try {
+          conn.send({ type: 'ready' })
+        } catch (e) {
+          console.error(e)
+        }
+      }
+
+      if (conn.open) {
+        handleConnOpen()
+      } else {
+        conn.on('open', handleConnOpen)
+      }
 
       conn.on('data', (data: any) => {
         const msg = data as TransferMessage
 
         if (msg.type === 'text') {
-          // Nhận được văn bản
           setReceivedText(msg.text)
           setReceivedFile(null)
           setProgress(100)
@@ -205,17 +265,27 @@ export function App() {
         }
       })
 
-      conn.on('error', () => {
-        clearTimeout(timeout)
+      conn.on('error', (err) => {
+        clearTimeout(timeoutTimer)
+        console.error('Conn error:', err)
         setStatus('idle')
-        setErrorMessage('Mất kết nối')
+        setErrorMessage('Mất kết nối với thiết bị gửi.')
       })
     })
 
-    receiverPeer.on('error', () => {
-      clearTimeout(timeout)
-      setStatus('idle')
-      setErrorMessage('Không thể kết nối')
+    receiverPeer.on('error', (err) => {
+      clearTimeout(timeoutTimer)
+      console.warn(`Receiver error (attempt ${attempt}):`, err)
+
+      // Nếu máy gửi vừa mới mở tab và server tín hiệu chưa kịp index, thử lại tối đa 3 lần
+      if ((err.type === 'peer-unavailable' || err.type === 'network') && attempt < 3) {
+        setTimeout(() => {
+          handleConnectToSender(cleanPin, attempt + 1)
+        }, 1500)
+      } else {
+        setStatus('idle')
+        setErrorMessage('Không tìm thấy thiết bị gửi hoặc phiên đã kết thúc.')
+      }
     })
   }
 
@@ -238,6 +308,7 @@ export function App() {
     setSenderPayload(null)
     setTextInput('')
     setPin('')
+    setIsPeerReady(false)
     setStatus('idle')
     setProgress(0)
     setBytesTransferred(0)
@@ -326,6 +397,7 @@ export function App() {
               <SenderView
                 payload={senderPayload}
                 pin={pin}
+                isReady={isPeerReady}
                 status={status}
                 progress={progress}
                 bytesSent={bytesTransferred}
@@ -428,7 +500,7 @@ export function App() {
             progress={progress}
             receivedFile={receivedFile}
             receivedText={receivedText}
-            onConnect={handleConnectToSender}
+            onConnect={(code) => handleConnectToSender(code, 1)}
             onReset={handleResetReceiver}
           />
         )}

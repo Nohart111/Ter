@@ -1,7 +1,8 @@
 import type { DataConnection } from 'peerjs'
 import type { FileHeader, FileChunk, FileComplete } from '../types'
 
-const CHUNK_SIZE = 64 * 1024 // 64 KB per chunk
+// 16 KB là chuẩn vàng cho WebRTC DataChannel trên mọi thiết bị (kể cả Safari iOS & Android)
+const CHUNK_SIZE = 16 * 1024 
 
 export async function sendFileInChunks(
   conn: DataConnection,
@@ -34,15 +35,15 @@ export async function sendFileInChunks(
       data: arrayBuffer
     }
 
-    // Chờ nếu buffer của DataChannel đang đầy (> 512KB) để tránh nghẽn RAM / rớt gói
+    // Chờ nếu buffer của DataChannel đang đầy (> 256KB) để tránh nghẽn
     const dc = (conn as any).dataChannel as RTCDataChannel | undefined
-    if (dc && dc.bufferedAmount > 512 * 1024) {
+    if (dc && dc.bufferedAmount > 256 * 1024) {
       await new Promise<void>((resolve) => {
         const checkBuffer = () => {
-          if (!dc || dc.bufferedAmount <= 256 * 1024) {
+          if (!dc || dc.bufferedAmount <= 64 * 1024) {
             resolve()
           } else {
-            setTimeout(checkBuffer, 15)
+            setTimeout(checkBuffer, 10)
           }
         }
         checkBuffer()

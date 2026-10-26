@@ -21,7 +21,11 @@ export interface TextPayload {
   text: string
 }
 
-export type TransferMessage = FileHeader | FileChunk | FileComplete | TextPayload
+export interface ReadySignal {
+  type: 'ready'
+}
+
+export type TransferMessage = FileHeader | FileChunk | FileComplete | TextPayload | ReadySignal
 
 export type TransferStatus = 
   | 'idle' 
